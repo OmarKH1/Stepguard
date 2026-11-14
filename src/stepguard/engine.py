@@ -21,6 +21,9 @@ class WorkflowContext:
         undo: Callable[[], Any] | None = None,
         **kwargs: Any,
     ) -> Any:
+        if undo is not None and not callable(undo):
+            raise TypeError("undo must be callable")
+
         existing = self.store.get_step(self.run_id, step_name)
         if existing is not None and existing.status == COMPLETED:
             # Completed in an earlier attempt: skip func, but keep its undo so a later

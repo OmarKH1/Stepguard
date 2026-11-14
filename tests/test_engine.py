@@ -41,6 +41,17 @@ def test_completed_step_is_not_rerun() -> None:
     charge.assert_called_once()
 
 
+def test_non_callable_undo_raises_type_error() -> None:
+    store = MemoryStore()
+    charge = Mock(return_value={"charge_id": "ch_1"})
+
+    with pytest.raises(TypeError, match="undo must be callable"):
+        WorkflowContext(store, "order-1").step("charge_card", charge, undo="refund_card")
+
+    charge.assert_not_called()
+    assert store.get_step("order-1", "charge_card") is None
+
+
 def test_saga_rollback_on_step_failure() -> None:
     store = MemoryStore()
     undos = Mock()
