@@ -5,17 +5,18 @@ from typing import Any
 
 import pytest
 
-from stepguard import BaseStore, MemoryStore, SQLiteStore, StepRecord
+from stepguard import BaseStore, ConcurrentExecutionError, MemoryStore, SQLiteStore, StepRecord
 
 FIXED_TIME = "2026-01-01T00:00:00+00:00"
+LOCK_TTL = 60.0
 
 
 @pytest.fixture
-def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[BaseStore]:
+def store(request: pytest.FixtureRequest, tmp_path: Path, clock) -> Iterator[BaseStore]:
     if request.param == "memory":
-        instance: BaseStore = MemoryStore()
+        instance: BaseStore = MemoryStore(lock_ttl=LOCK_TTL, clock=clock)
     else:
-        instance = SQLiteStore(str(tmp_path / "stepguard.db"))
+        instance = SQLiteStore(str(tmp_path / "stepguard.db"), lock_ttl=LOCK_TTL, clock=clock)
     yield instance
     instance.close()
 
@@ -121,6 +122,134 @@ def test_concurrent_saves_from_multiple_threads(store: BaseStore) -> None:
         thread.join()
 
     assert len(store.get_run_steps("run-1")) == 100
+
+
+@all_stores
+def test_lock_blocks_second_acquire_until_released(store: BaseStore) -> None:
+    store.acquire_lock("run-1")
+
+    with pytest.raises(ConcurrentExecutionError):
+        store.acquire_lock("run-1")
+    store.acquire_lock("run-2")  # Locks are per run.
+
+    store.release_lock("run-1")
+    store.acquire_lock("run-1")
+
+
+@all_stores
+def test_release_lock_without_holding_it_is_a_no_op(store: BaseStore) -> None:
+    store.release_lock("run-1")
+    store.acquire_lock("run-1")
+
+
+@all_stores
+def test_only_one_thread_acquires_a_contended_lock(store: BaseStore) -> None:
+    barrier = threading.Barrier(8)
+    winners: list[int] = []
+
+    def contend(worker: int) -> None:
+        barrier.wait()
+        try:
+            store.acquire_lock("run-1")
+            winners.append(worker)
+        except ConcurrentExecutionError:
+            pass
+
+    threads = [threading.Thread(target=contend, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(winners) == 1
+
+
+@all_stores
+def test_expired_lock_can_be_taken_over(store: BaseStore, clock) -> None:
+    store.acquire_lock("run-1")
+
+    clock.advance(LOCK_TTL - 1)
+    with pytest.raises(ConcurrentExecutionError):
+        store.acquire_lock("run-1")
+
+    clock.advance(1)
+    store.acquire_lock("run-1")
+
+
+@all_stores
+def test_refresh_lock_extends_expiry(store: BaseStore, clock) -> None:
+    owner = store.acquire_lock("run-1")
+    clock.advance(LOCK_TTL - 1)
+    store.refresh_lock("run-1", owner)
+
+    clock.advance(LOCK_TTL - 1)  # Past the original expiry, but not the refreshed one.
+    with pytest.raises(ConcurrentExecutionError):
+        store.acquire_lock("run-1")
+
+
+@all_stores
+def test_previous_owner_cannot_refresh_or_release_after_takeover(
+    store: BaseStore, clock
+) -> None:
+    stale_owner = store.acquire_lock("run-1")
+    clock.advance(LOCK_TTL)
+    store.acquire_lock("run-1")
+
+    with pytest.raises(ConcurrentExecutionError):
+        store.refresh_lock("run-1", stale_owner)
+    store.release_lock("run-1", stale_owner)
+
+    with pytest.raises(ConcurrentExecutionError):
+        store.acquire_lock("run-1")  # The new owner still holds it.
+
+
+@all_stores
+def test_refresh_lock_raises_once_released(store: BaseStore) -> None:
+    owner = store.acquire_lock("run-1")
+    store.release_lock("run-1", owner)
+
+    with pytest.raises(ConcurrentExecutionError):
+        store.refresh_lock("run-1", owner)
+
+
+def test_sqlite_lock_left_by_crashed_process_expires(tmp_path: Path, clock) -> None:
+    db_path = str(tmp_path / "stepguard.db")
+    crashed = SQLiteStore(db_path, lock_ttl=LOCK_TTL, clock=clock)
+    crashed.acquire_lock("run-1")
+    crashed.close()  # Gone without releasing, like a killed process.
+
+    survivor = SQLiteStore(db_path, lock_ttl=LOCK_TTL, clock=clock)
+    try:
+        with pytest.raises(ConcurrentExecutionError):
+            survivor.acquire_lock("run-1")
+
+        clock.advance(LOCK_TTL)
+        survivor.acquire_lock("run-1")
+    finally:
+        survivor.close()
+
+
+def test_lock_ttl_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        MemoryStore(lock_ttl=0)
+    with pytest.raises(ValueError):
+        SQLiteStore(lock_ttl=-1)
+
+
+def test_sqlite_lock_is_shared_between_store_instances(tmp_path: Path) -> None:
+    # Two stores on one file stand in for two processes.
+    db_path = str(tmp_path / "stepguard.db")
+    first, second = SQLiteStore(db_path), SQLiteStore(db_path)
+    try:
+        first.acquire_lock("run-1")
+        with pytest.raises(ConcurrentExecutionError):
+            second.acquire_lock("run-1")
+
+        first.release_lock("run-1")
+        second.acquire_lock("run-1")
+    finally:
+        first.close()
+        second.close()
 
 
 def test_sqlite_store_persists_across_instances(tmp_path: Path) -> None:
