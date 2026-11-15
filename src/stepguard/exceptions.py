@@ -22,3 +22,9 @@ class RollbackError(StepGuardError):
 
 class WorkflowLockedError(StepGuardError):
     """Raised when a workflow run_id is already actively running."""
+
+
+class ConcurrentExecutionError(WorkflowLockedError):
+    def __init__(self, run_id: str) -> None:
+        self.run_id = run_id
+        super().__init__(f"Workflow run {run_id!r} is already running")
