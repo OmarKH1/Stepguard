@@ -1,6 +1,6 @@
 from .engine import WorkflowContext, durable_workflow
 from .exceptions import StepExecutionError, RollbackError, ConcurrentExecutionError
-from .storage import BaseStore, MemoryStore, SQLiteStore
+from .storage import BaseStore, MemoryStore, SQLiteStore, StepRecord
 
 __all__ = [
     'WorkflowContext',
@@ -10,5 +10,6 @@ __all__ = [
     'ConcurrentExecutionError',
     'BaseStore',
     'MemoryStore',
-    'SQLiteStore'
+    'SQLiteStore',
+    'StepRecord'
 ]
